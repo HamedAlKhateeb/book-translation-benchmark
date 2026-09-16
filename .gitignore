@@ -1,0 +1,29 @@
+# Python byte code & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Large Book Files & Model checkpoints (Ignore from Git)
+*.epub
+*.docx
+!tests/*.docx
+*.pdf
+*.ckpt
+*.pt
+*.bin
+*.log
+
+# Caches
+.cache/
+hf_cache/
+
+# OS specific
+.DS_Store
+Thumbs.db
