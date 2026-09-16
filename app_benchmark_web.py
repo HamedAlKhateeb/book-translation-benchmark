@@ -24,6 +24,7 @@ import json
 import zipfile
 import functools
 import urllib.parse
+import urllib.request
 from html.parser import HTMLParser
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
@@ -151,6 +152,69 @@ def align_segments(ref_list, ai_list, max_merge=4):
 
     matches.reverse()
     return matches
+
+def align_segments_with_ai(ref_list, ai_list, src_list=None, api_key=None):
+    """
+    Uses an LLM (Gemini API via direct HTTPS REST) to semantically align and map
+    paragraphs between Human Reference Translation and AI Translation into exact 1-to-1 units.
+    """
+    if not api_key:
+        return None
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        
+        prompt = (
+            "You are an expert bilingual translation alignment system.\n"
+            "Your SOLE task is to align and map the paragraphs between Human Reference Translation (Arabic) "
+            "and Machine Translation (Arabic) into matching 1-to-1 semantic units.\n\n"
+            "Rules:\n"
+            "1. Human translators often merge multiple sentences or split paragraphs. Match them accurately.\n"
+            "2. Do NOT omit content. Every part of the translation must be aligned to its corresponding match.\n"
+            "3. If English source paragraphs are provided, map the corresponding English segment to 'src'.\n"
+            "4. Return ONLY a JSON array of objects with keys: 'id' (integer), 'src' (string), 'ref' (string), 'mt' (string).\n\n"
+            f"--- Human Reference Paragraphs ({len(ref_list)}) ---\n"
+            + "\n".join(f"[{i+1}] {p}" for i, p in enumerate(ref_list[:250]))
+            + f"\n\n--- Machine Translation Paragraphs ({len(ai_list)}) ---\n"
+            + "\n".join(f"[{i+1}] {p}" for i, p in enumerate(ai_list[:250]))
+        )
+        if src_list:
+            prompt += f"\n\n--- English Source Paragraphs ({len(src_list)}) ---\n" + "\n".join(f"[{i+1}] {p}" for i, p in enumerate(src_list[:250]))
+
+        req_data = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 8192
+            }
+        }
+        req_bytes = json.dumps(req_data).encode('utf-8')
+        req = urllib.request.Request(url, data=req_bytes, headers={"Content-Type": "application/json"}, method="POST")
+        
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            resp_body = resp.read().decode('utf-8')
+            resp_json = json.loads(resp_body)
+            raw_text = resp_json['candidates'][0]['content']['parts'][0]['text']
+            aligned_units = json.loads(raw_text)
+            
+            units = []
+            for idx, u in enumerate(aligned_units):
+                ref_txt = u.get('ref', '').strip()
+                mt_txt = u.get('mt', '').strip()
+                src_txt = u.get('src', '').strip()
+                if ref_txt or mt_txt:
+                    units.append({
+                        'id': idx + 1,
+                        'source': src_txt or "(لم يتم تقديم نص إنجليزي)",
+                        'reference': ref_txt,
+                        'hypothesis': mt_txt
+                    })
+            if units:
+                print(f"[AI Segment Aligner] Successfully aligned {len(units)} segments using Gemini API.")
+                return units
+    except Exception as e:
+        print(f"[AI Aligner Fallback] Error with AI Aligner: {e}. Falling back to Dynamic Programming.")
+    return None
 
 # ----------------- MQM Error Taxonomy -----------------
 def classify_mqm(src, ref, hyp, comet_score, chrf_score, bleu_score):
@@ -410,6 +474,25 @@ HTML_PAGE = """<!DOCTYPE html>
             <div class="text-xs dark:text-slate-400 text-slate-500 flex items-center gap-2">
                 <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span>يدعم EPUB, DOCX, HTML, MD</span>
+            </div>
+        </div>
+
+        <!-- AI Segment Aligner Settings Bar -->
+        <div class="inner-card p-5 rounded-2xl mb-6 flex flex-col md:flex-row items-center justify-between gap-4 border border-sky-500/20">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">🤖</span>
+                <div>
+                    <h4 class="text-sm font-bold flex items-center gap-2">
+                        <span>محاذاة وضبط الفقرات بالذكاء الاصطناعي (AI Segment Aligner)</span>
+                        <span class="px-2 py-0.5 rounded-full text-[10px] bg-sky-500/10 text-sky-500 border border-sky-500/20 font-bold">اختياري</span>
+                    </h4>
+                    <p class="text-xs dark:text-slate-400 text-slate-500 mt-1">
+                        وظيفة الذكاء الاصطناعي هنا محددة: قراءة ومطابقة حدود الفقرات والجمل بين الترجمة البشرية والآلية (1-to-1) ومعالجة دمج أو تقسيم الجمل بدقة بشرية تامة قبل التقييم.
+                    </p>
+                </div>
+            </div>
+            <div class="w-full md:w-auto flex items-center gap-2">
+                <input type="password" id="geminiApiKeyInput" placeholder="الصق Gemini API Key هنا..." class="dark:bg-slate-900 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-xl px-4 py-2.5 text-xs w-full md:w-72 focus:outline-none focus:border-sky-500">
             </div>
         </div>
 
@@ -825,6 +908,18 @@ HTML_PAGE = """<!DOCTYPE html>
             });
         });
 
+        // Persist Gemini API Key in localStorage
+        const savedApiKey = localStorage.getItem('gemini_api_key');
+        const apiKeyInput = document.getElementById('geminiApiKeyInput');
+        if (savedApiKey && apiKeyInput) {
+            apiKeyInput.value = savedApiKey;
+        }
+        if (apiKeyInput) {
+            apiKeyInput.addEventListener('input', (e) => {
+                localStorage.setItem('gemini_api_key', e.target.value.trim());
+            });
+        }
+
         // Evaluation Execution: Single
         async function runSingleEvaluation() {
             const btn = document.getElementById('submitBtn');
@@ -845,6 +940,12 @@ HTML_PAGE = """<!DOCTYPE html>
             formData.append('ai_text', document.getElementById('aiText').value);
             formData.append('book_title', document.getElementById('bookTitleInput').value.trim());
             formData.append('chapter', document.getElementById('chapterInput').value.trim());
+
+            const apiKey = document.getElementById('geminiApiKeyInput') ? document.getElementById('geminiApiKeyInput').value.trim() : '';
+            if (apiKey) {
+                formData.append('api_key', apiKey);
+                localStorage.setItem('gemini_api_key', apiKey);
+            }
 
             btn.disabled = true;
             btn.classList.add('opacity-50');
@@ -892,6 +993,12 @@ HTML_PAGE = """<!DOCTYPE html>
             Array.from(srcFiles).forEach(f => formData.append('batch_src_files', f));
             Array.from(refFiles).forEach(f => formData.append('batch_ref_files', f));
             Array.from(aiFiles).forEach(f => formData.append('batch_ai_files', f));
+
+            const apiKey = document.getElementById('geminiApiKeyInput') ? document.getElementById('geminiApiKeyInput').value.trim() : '';
+            if (apiKey) {
+                formData.append('api_key', apiKey);
+                localStorage.setItem('gemini_api_key', apiKey);
+            }
 
             btn.disabled = true;
             btn.classList.add('opacity-50');
@@ -1170,35 +1277,47 @@ HTML_PAGE = """<!DOCTYPE html>
 </html>
 """
 
-def evaluate_paragraphs(src_paras, ref_paras, ai_paras, book_title="كتاب", chapter="فصل"):
-    matches = align_segments(ref_paras, ai_paras)
-    if not matches:
-        return None
+def evaluate_paragraphs(src_paras, ref_paras, ai_paras, book_title="كتاب", chapter="فصل", api_key=None):
+    units = None
+    if api_key:
+        units = align_segments_with_ai(ref_paras, ai_paras, src_paras, api_key=api_key)
+        if units:
+            for u in units:
+                r_txt = u['reference']
+                a_txt = u['hypothesis']
+                u['chrf'] = round(sacrebleu.sentence_chrf(a_txt, [r_txt], word_order=2).score, 2)
+                u['bleu'] = round(sacrebleu.sentence_bleu(a_txt, [r_txt]).score, 2)
+                u['comet'] = 0.0
 
-    units = []
-    for idx, m in enumerate(matches):
-        prev_i, prev_j, dr, da, r_txt, a_txt = m
-        if src_paras:
-            s_start = min(prev_j, len(src_paras) - 1)
-            s_end = min(prev_j + da, len(src_paras))
-            s_txt = ' '.join(src_paras[s_start:s_end])
-            if not s_txt:
-                s_txt = src_paras[min(idx, len(src_paras) - 1)]
-        else:
-            s_txt = "(لم يتم إدخال نص إنجليزي)"
+    if not units:
+        matches = align_segments(ref_paras, ai_paras)
+        if not matches:
+            return None
 
-        chrf_val = round(sacrebleu.sentence_chrf(a_txt, [r_txt], word_order=2).score, 2)
-        bleu_val = round(sacrebleu.sentence_bleu(a_txt, [r_txt]).score, 2)
+        units = []
+        for idx, m in enumerate(matches):
+            prev_i, prev_j, dr, da, r_txt, a_txt = m
+            if src_paras:
+                s_start = min(prev_j, len(src_paras) - 1)
+                s_end = min(prev_j + da, len(src_paras))
+                s_txt = ' '.join(src_paras[s_start:s_end])
+                if not s_txt:
+                    s_txt = src_paras[min(idx, len(src_paras) - 1)]
+            else:
+                s_txt = "(لم يتم إدخال نص إنجليزي)"
 
-        units.append({
-            'id': idx + 1,
-            'source': s_txt,
-            'reference': r_txt,
-            'hypothesis': a_txt,
-            'chrf': chrf_val,
-            'bleu': bleu_val,
-            'comet': 0.0
-        })
+            chrf_val = round(sacrebleu.sentence_chrf(a_txt, [r_txt], word_order=2).score, 2)
+            bleu_val = round(sacrebleu.sentence_bleu(a_txt, [r_txt]).score, 2)
+
+            units.append({
+                'id': idx + 1,
+                'source': s_txt,
+                'reference': r_txt,
+                'hypothesis': a_txt,
+                'chrf': chrf_val,
+                'bleu': bleu_val,
+                'comet': 0.0
+            })
 
     try:
         model = get_comet_model()
@@ -1307,8 +1426,9 @@ async def evaluate_handler(request):
 
     book_title = data.get('book_title') or 'كتاب'
     chapter = data.get('chapter') or 'فصل'
+    api_key = data.get('api_key', '').strip()
 
-    res = evaluate_paragraphs(src_paras, ref_paras, ai_paras, book_title, chapter)
+    res = evaluate_paragraphs(src_paras, ref_paras, ai_paras, book_title, chapter, api_key=api_key)
     if not res:
         return web.json_response({'error': 'تعذر محاذاة الفقرات، تأكد من صحة النصوص والملفات المدخلة.'})
 
@@ -1320,6 +1440,7 @@ async def evaluate_batch_handler(request):
     src_files = data.getall('batch_src_files', [])
     ref_files = data.getall('batch_ref_files', [])
     ai_files = data.getall('batch_ai_files', [])
+    api_key = data.get('api_key', '').strip()
 
     if not ref_files or not ai_files:
         return web.json_response({'error': 'يرجى اختيار ملفات الترجمة البشرية والآلية.'})
@@ -1337,7 +1458,7 @@ async def evaluate_batch_handler(request):
         src_paras = [clean_english(p) for p in extract_text_from_file(src_f.filename, src_f.file.read())] if src_f else []
 
         ch_name = f"الفصل {i+1} ({ref_f.filename.split('.')[0]})"
-        res = evaluate_paragraphs(src_paras, ref_paras, ai_paras, book_title="مجموعة فصول", chapter=ch_name)
+        res = evaluate_paragraphs(src_paras, ref_paras, ai_paras, book_title="مجموعة فصول", chapter=ch_name, api_key=api_key)
         if res:
             res['chapter_name'] = ch_name
             results_list.append(res)
