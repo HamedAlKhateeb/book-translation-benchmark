@@ -5,6 +5,7 @@ Book Translation Benchmark Web Application
 Supports: EPUB, DOCX, HTML, Markdown
 Metrics: COMET (Unbabel/wmt22-comet-da), MQM, chrF++, BLEU
 Database & Auth: Firebase Authentication (Email/Password & Google) + Cloud Firestore
+Export Formats: PDF, DOCX, Markdown, CSV
 """
 
 import os
@@ -20,6 +21,10 @@ from html.parser import HTMLParser
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 import sacrebleu
+import docx
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 
 # Monkeypatch for Python 3.14 compatibility with COMET
 class _HashedSeq(list):
@@ -199,7 +204,113 @@ def classify_mqm(src, ref, hyp, comet_score, chrf_score, bleu_score):
     mqm_score = max(0.0, min(100.0, 100.0 - penalty_points))
     return cat, err_type, sev, desc, round(mqm_score, 2)
 
-# ----------------- Web UI with Firebase Auth & Firestore -----------------
+# ----------------- DOCX Generator -----------------
+def generate_docx_report(data):
+    doc = docx.Document()
+    
+    # Page Margins
+    for s in doc.sections:
+        s.top_margin = Inches(0.8)
+        s.bottom_margin = Inches(0.8)
+        s.left_margin = Inches(0.8)
+        s.right_margin = Inches(0.8)
+
+    # Title
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_title = p_title.add_run("تقرير مقارنة وتقييم جودة ترجمة الكتب")
+    r_title.font.size = Pt(22)
+    r_title.font.bold = True
+    r_title.font.color.rgb = RGBColor(15, 23, 42)
+
+    # Subtitle
+    book_title = data.get('book_title') or 'كتاب'
+    chapter = data.get('chapter') or 'فصل'
+    p_sub = doc.add_paragraph()
+    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r_sub = p_sub.add_run(f"الكتاب: {book_title}  |  الفصل: {chapter}")
+    r_sub.font.size = Pt(13)
+    r_sub.font.bold = True
+    r_sub.font.color.rgb = RGBColor(71, 85, 105)
+
+    doc.add_paragraph() # Spacer
+
+    # Section 1: Summary Metrics Table
+    doc.add_heading("1. ملخص المعايير التقييمية (Key Metrics)", level=2)
+    summary = data.get('summary', {})
+    t_m = doc.add_table(rows=2, cols=4)
+    t_m.alignment = WD_TABLE_ALIGNMENT.CENTER
+    
+    m_headers = ["COMET (العصبي)", "جودة MQM", "chrF++ (الصرفي)", "BLEU (اللفظي)"]
+    m_vals = [
+        str(summary.get('avg_comet', '0.0000')),
+        f"{summary.get('avg_mqm', '0.0')}%",
+        str(summary.get('avg_chrf', '0.00')),
+        str(summary.get('avg_bleu', '0.00'))
+    ]
+    for i, h in enumerate(m_headers):
+        cell = t_m.cell(0, i)
+        cell.text = h
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if p.runs:
+            p.runs[0].font.bold = True
+
+    for i, v in enumerate(m_vals):
+        cell = t_m.cell(1, i)
+        cell.text = v
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if p.runs:
+            p.runs[0].font.bold = True
+            p.runs[0].font.size = Pt(14)
+
+    doc.add_paragraph()
+
+    # Section 2: Error Distribution
+    doc.add_heading("2. توزيع ونسب أنواع الأخطاء (MQM Breakdown)", level=2)
+    errors = data.get('errors', [])
+    t_e = doc.add_table(rows=len(errors)+1, cols=4)
+    t_e.alignment = WD_TABLE_ALIGNMENT.CENTER
+    e_headers = ["نوع الخطأ / التصنيف", "مستوى الخطورة", "التكرار", "النسبة المئوية (%)"]
+    for i, h in enumerate(e_headers):
+        cell = t_e.cell(0, i)
+        cell.text = h
+        cell.paragraphs[0].runs[0].font.bold = True
+
+    for r_idx, err in enumerate(errors):
+        t_e.cell(r_idx+1, 0).text = str(err.get('type', ''))
+        t_e.cell(r_idx+1, 1).text = str(err.get('severity', ''))
+        t_e.cell(r_idx+1, 2).text = str(err.get('count', 0))
+        t_e.cell(r_idx+1, 3).text = str(err.get('percentage', ''))
+
+    doc.add_paragraph()
+
+    # Section 3: Detailed Segments
+    doc.add_heading("3. جدول المقارنة المتزامنة للفقرات وملاحظات MQM", level=2)
+    segments = data.get('segments', [])
+    t_s = doc.add_table(rows=len(segments)+1, cols=6)
+    t_s.alignment = WD_TABLE_ALIGNMENT.CENTER
+    s_headers = ["#", "الأصل الإنجليزي", "الترجمة البشرية", "ترجمة الذكاء الاصطناعي", "المقاييس", "ملاحظة MQM"]
+    for i, h in enumerate(s_headers):
+        cell = t_s.cell(0, i)
+        cell.text = h
+        cell.paragraphs[0].runs[0].font.bold = True
+
+    for r_idx, s in enumerate(segments):
+        t_s.cell(r_idx+1, 0).text = str(s.get('id', ''))
+        t_s.cell(r_idx+1, 1).text = str(s.get('source', ''))
+        t_s.cell(r_idx+1, 2).text = str(s.get('reference', ''))
+        t_s.cell(r_idx+1, 3).text = str(s.get('hypothesis', ''))
+        t_s.cell(r_idx+1, 4).text = f"C: {s.get('comet')}\nM: {s.get('mqm')}%\nch: {s.get('chrf')}\nB: {s.get('bleu')}"
+        t_s.cell(r_idx+1, 5).text = f"{s.get('error_type')}\n{s.get('description')}"
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+# ----------------- Web UI with Multi-Format Export -----------------
 from aiohttp import web
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -214,15 +325,22 @@ HTML_PAGE = """<!DOCTYPE html>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+    <!-- html2pdf.js for client-side PDF export -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <style>
         body { font-family: 'Tajawal', sans-serif; background-color: #0f172a; color: #f8fafc; }
         .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+        @media print {
+            body { background: white !important; color: black !important; }
+            .no-print { display: none !important; }
+            .glass { background: white !important; border: 1px solid #ccc !important; color: black !important; }
+        }
     </style>
 </head>
 <body class="min-h-screen">
 
-    <!-- Header with Firebase Auth State -->
-    <header class="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-50 backdrop-blur">
+    <!-- Header -->
+    <header class="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-50 backdrop-blur no-print">
         <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
             <div class="flex items-center space-x-4 space-x-reverse">
                 <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-xl font-bold shadow-lg shadow-sky-500/20">
@@ -234,7 +352,6 @@ HTML_PAGE = """<!DOCTYPE html>
                 </div>
             </div>
             
-            <!-- Auth User Profile Bar -->
             <div class="flex items-center gap-3">
                 <div id="authUserSection" class="hidden flex items-center gap-3">
                     <span id="userEmailSpan" class="text-xs text-slate-300 font-medium bg-slate-800 px-3 py-1.5 rounded-full border border-slate-700"></span>
@@ -247,7 +364,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 </div>
                 <div id="authLoginBtnSection">
                     <button onclick="openAuthModal()" class="text-xs bg-gradient-to-r from-sky-500 to-indigo-600 text-white px-4 py-2 rounded-xl font-bold shadow-lg shadow-sky-500/20 hover:opacity-90 transition">
-                        🔐 تسجيل الدخول / حساب جديد
+                        🔐 تسجيل الدخول
                     </button>
                 </div>
             </div>
@@ -255,45 +372,34 @@ HTML_PAGE = """<!DOCTYPE html>
     </header>
 
     <main class="max-w-7xl mx-auto px-6 py-8">
-        <!-- Auth Gate Alert if not logged in -->
-        <div id="authBanner" class="p-4 mb-6 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <span class="text-xl">⚠️</span>
-                <p class="text-xs text-amber-200">
-                    <strong>تنبيه:</strong> يمكنك تجربة المقارنة، ولكن لحفظ سجل التقييمات وقواعد البيانات في Firebase وتحميل تقارير غير محدودة، يُرجى تسجيل الدخول.
-                </p>
-            </div>
-            <button onclick="openAuthModal()" class="text-xs font-bold text-amber-400 hover:underline">تسجيل الدخول الآن ←</button>
-        </div>
-
         <!-- 3-Step Wizard Navigation -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 no-print">
             <div class="glass p-5 rounded-2xl border-r-4 border-r-sky-500">
                 <span class="text-xs font-bold text-sky-400 uppercase tracking-wider">المرحلة الأولى</span>
                 <h3 class="text-lg font-bold text-white mt-1">1. استخراج الفصول</h3>
-                <p class="text-xs text-slate-400 mt-1">رفع كتب المصدر والترجمة بصيغ (EPUB / DOCX / HTML / MD)</p>
+                <p class="text-xs text-slate-400 mt-1">دعم EPUB, DOCX, HTML, Markdown</p>
             </div>
             <div class="glass p-5 rounded-2xl border-r-4 border-r-indigo-500">
                 <span class="text-xs font-bold text-indigo-400 uppercase tracking-wider">المرحلة الثانية</span>
                 <h3 class="text-lg font-bold text-white mt-1">2. المحاذاة والتقييم</h3>
-                <p class="text-xs text-slate-400 mt-1">مطابقة الفقرات ديناميكياً وتشغيل COMET و chrF++ و BLEU</p>
+                <p class="text-xs text-slate-400 mt-1">مطابقة الفقرات وتشغيل COMET و chrF++ و BLEU</p>
             </div>
             <div class="glass p-5 rounded-2xl border-r-4 border-r-emerald-500">
                 <span class="text-xs font-bold text-emerald-400 uppercase tracking-wider">المرحلة الثالثة</span>
-                <h3 class="text-lg font-bold text-white mt-1">3. النتائج وتحليل MQM</h3>
-                <p class="text-xs text-slate-400 mt-1">حفظ النتائج في Firestore وتصدير تقارير Excel المهيأة للعربية</p>
+                <h3 class="text-lg font-bold text-white mt-1">3. تصدير التقارير</h3>
+                <p class="text-xs text-slate-400 mt-1">تصدير فوري بصيغ: PDF, Word, Markdown, CSV</p>
             </div>
         </div>
 
         <!-- Input & Upload Section -->
-        <section class="glass p-8 rounded-3xl mb-8 shadow-2xl">
-            <div class="flex items-center justify-between mb-6">
+        <section class="glass p-8 rounded-3xl mb-8 shadow-2xl no-print">
+            <div class="flex flex-col md:flex-row items-center justify-between mb-6 gap-4">
                 <h2 class="text-xl font-bold flex items-center gap-3 text-sky-400">
-                    <span>📁</span> إدخال بيانات المقارنة والتقييم
+                    <span>📁</span> إدخال ملفات الكتاب والمقارنة
                 </h2>
-                <div class="flex items-center gap-2">
-                    <input type="text" id="bookTitleInput" placeholder="عنوان الكتاب (مثال: العناصر: مقدمة قصيرة)..." class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 w-64 focus:outline-none focus:border-sky-500">
-                    <input type="text" id="chapterInput" placeholder="رقم/اسم الفصل..." class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 w-32 focus:outline-none focus:border-sky-500">
+                <div class="flex items-center gap-2 w-full md:w-auto">
+                    <input type="text" id="bookTitleInput" placeholder="عنوان الكتاب (مثال: العناصر: مقدمة قصيرة)..." class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 w-full md:w-64 focus:outline-none focus:border-sky-500">
+                    <input type="text" id="chapterInput" placeholder="رقم الفصل..." class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 w-28 focus:outline-none focus:border-sky-500">
                 </div>
             </div>
 
@@ -302,7 +408,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     <!-- Source File -->
                     <div class="bg-slate-800/60 p-5 rounded-2xl border border-slate-700">
                         <label class="block text-sm font-bold text-slate-200 mb-2">1. النص الأصلي (Source - EN)</label>
-                        <p class="text-xs text-slate-400 mb-3">ملف الفصل الإنجليزي (.html, .docx, .epub, .md)</p>
+                        <p class="text-xs text-slate-400 mb-3">اختر ملف (.html, .docx, .epub, .md)</p>
                         <input type="file" id="srcFile" accept=".html,.xhtml,.docx,.epub,.md,.txt" class="block w-full text-xs text-slate-400 file:mr-0 file:ml-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-sky-600 file:text-white hover:file:bg-sky-500 cursor-pointer">
                         <textarea id="srcText" rows="4" placeholder="أو الصق النص الإنجليزي هنا مباشرة..." class="mt-3 w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-sky-500"></textarea>
                     </div>
@@ -310,14 +416,14 @@ HTML_PAGE = """<!DOCTYPE html>
                     <!-- Human Reference File -->
                     <div class="bg-slate-800/60 p-5 rounded-2xl border border-slate-700">
                         <label class="block text-sm font-bold text-slate-200 mb-2">2. الترجمة البشرية (Reference - AR)</label>
-                        <p class="text-xs text-slate-400 mb-3">ملف الترجمة المرجعية المعتمدة للكتاب</p>
+                        <p class="text-xs text-slate-400 mb-3">ملف الترجمة المرجعية المعتمدة</p>
                         <input type="file" id="refFile" accept=".html,.xhtml,.docx,.epub,.md,.txt" class="block w-full text-xs text-slate-400 file:mr-0 file:ml-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer">
                         <textarea id="refText" rows="4" placeholder="أو الصق الترجمة البشرية هنا مباشرة..." class="mt-3 w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"></textarea>
                     </div>
 
                     <!-- AI Translation File -->
                     <div class="bg-slate-800/60 p-5 rounded-2xl border border-slate-700">
-                        <label class="block text-sm font-bold text-slate-200 mb-2">3. ترجمة الآلة / الذكاء الاصطناعي (AI MT)</label>
+                        <label class="block text-sm font-bold text-slate-200 mb-2">3. ترجمة الذكاء الاصطناعي (AI MT)</label>
                         <p class="text-xs text-slate-400 mb-3">ملف الترجمة الآلية المراد تقييمها</p>
                         <input type="file" id="aiFile" accept=".html,.xhtml,.docx,.epub,.md,.txt" class="block w-full text-xs text-slate-400 file:mr-0 file:ml-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer">
                         <textarea id="aiText" rows="4" placeholder="أو الصق ترجمة الذكاء الاصطناعي هنا مباشرة..." class="mt-3 w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"></textarea>
@@ -340,38 +446,69 @@ HTML_PAGE = """<!DOCTYPE html>
             </form>
         </section>
 
-        <!-- Results Section (Hidden until run) -->
+        <!-- Results Section -->
         <div id="resultsArea" class="hidden space-y-8">
-            <!-- Score Cards -->
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
-                <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-indigo-500">
-                    <span class="text-xs font-bold text-slate-400 uppercase">مؤشر COMET العصبي</span>
-                    <div id="metricComet" class="text-3xl font-extrabold text-indigo-400 mt-2">0.0000</div>
-                    <span class="text-[10px] text-slate-500 mt-1 block">الأقرب للتقييم البشري (0 - 1)</span>
+            
+            <!-- Multi-Format Export Center Bar -->
+            <section class="glass p-6 rounded-3xl border-2 border-sky-500/30 shadow-2xl no-print">
+                <div class="flex flex-col lg:flex-row items-center justify-between gap-4">
+                    <div>
+                        <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                            <span>📥</span> مركز تصدير التقارير (Export Center)
+                        </h3>
+                        <p class="text-xs text-slate-400 mt-0.5">اختر الصيغة المناسبة لتصدير النتائج بالكامل بترميز يدعم اللغة العربية:</p>
+                    </div>
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 w-full lg:w-auto">
+                        <!-- PDF -->
+                        <button onclick="downloadPDF()" class="py-2.5 px-4 bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-rose-600/20 flex items-center justify-center gap-2 transition">
+                            <span>📕</span> تصدير PDF
+                        </button>
+                        <!-- Word (DOCX) -->
+                        <button onclick="downloadDOCX()" class="py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 transition">
+                            <span>📝</span> تصدير Word (.docx)
+                        </button>
+                        <!-- Markdown -->
+                        <button onclick="downloadMarkdown()" class="py-2.5 px-4 bg-gradient-to-r from-slate-700 to-slate-800 hover:bg-slate-600 border border-slate-600 text-slate-100 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition">
+                            <span>📑</span> تصدير Markdown (.md)
+                        </button>
+                        <!-- CSV -->
+                        <button onclick="downloadCSV('details')" class="py-2.5 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 transition">
+                            <span>📊</span> تصدير Excel (CSV)
+                        </button>
+                    </div>
                 </div>
-                <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-emerald-500">
-                    <span class="text-xs font-bold text-slate-400 uppercase">جودة MQM القياسية</span>
-                    <div id="metricMqm" class="text-3xl font-extrabold text-emerald-400 mt-2">0.0%</div>
-                    <span class="text-[10px] text-slate-500 mt-1 block">خصم العقوبات لكل 100 كلمة</span>
-                </div>
-                <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-sky-500">
-                    <span class="text-xs font-bold text-slate-400 uppercase">معيار chrF++ الصرفي</span>
-                    <div id="metricChrf" class="text-3xl font-extrabold text-sky-400 mt-2">0.00</div>
-                    <span class="text-[10px] text-slate-500 mt-1 block">الأفضل لبنية اللغة العربية (0-100)</span>
-                </div>
-                <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-purple-500">
-                    <span class="text-xs font-bold text-slate-400 uppercase">معيار BLEU اللفظي</span>
-                    <div id="metricBleu" class="text-3xl font-extrabold text-purple-400 mt-2">0.00</div>
-                    <span class="text-[10px] text-slate-500 mt-1 block">تطابق الكلمات المباشر (0-100)</span>
-                </div>
-            </div>
+            </section>
 
-            <!-- Error Distribution & Export -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Printable Report Area -->
+            <div id="printableReport" class="space-y-8">
+                <!-- Score Cards -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+                    <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-indigo-500">
+                        <span class="text-xs font-bold text-slate-400 uppercase">مؤشر COMET العصبي</span>
+                        <div id="metricComet" class="text-3xl font-extrabold text-indigo-400 mt-2">0.0000</div>
+                        <span class="text-[10px] text-slate-500 mt-1 block">الأقرب للتقييم البشري (0 - 1)</span>
+                    </div>
+                    <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-emerald-500">
+                        <span class="text-xs font-bold text-slate-400 uppercase">جودة MQM القياسية</span>
+                        <div id="metricMqm" class="text-3xl font-extrabold text-emerald-400 mt-2">0.0%</div>
+                        <span class="text-[10px] text-slate-500 mt-1 block">خصم العقوبات لكل 100 كلمة</span>
+                    </div>
+                    <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-sky-500">
+                        <span class="text-xs font-bold text-slate-400 uppercase">معيار chrF++ الصرفي</span>
+                        <div id="metricChrf" class="text-3xl font-extrabold text-sky-400 mt-2">0.00</div>
+                        <span class="text-[10px] text-slate-500 mt-1 block">الأفضل لبنية اللغة العربية (0-100)</span>
+                    </div>
+                    <div class="glass p-6 rounded-3xl text-center border-t-4 border-t-purple-500">
+                        <span class="text-xs font-bold text-slate-400 uppercase">معيار BLEU اللفظي</span>
+                        <div id="metricBleu" class="text-3xl font-extrabold text-purple-400 mt-2">0.00</div>
+                        <span class="text-[10px] text-slate-500 mt-1 block">تطابق الكلمات المباشر (0-100)</span>
+                    </div>
+                </div>
+
                 <!-- Error Distribution Card -->
-                <div class="glass p-6 rounded-3xl lg:col-span-2">
+                <div class="glass p-6 rounded-3xl">
                     <h3 class="text-lg font-bold text-white mb-4 flex items-center justify-between">
-                        <span>🔍 توزيع ونسب أنواع الأخطاء (MQM Breakdown)</span>
+                        <span>🔍 توزيع ونسب أنواع الأخطاء (MQM Error Breakdown)</span>
                         <span id="totalSegmentsBadge" class="text-xs px-3 py-1 bg-slate-800 rounded-full text-slate-300"></span>
                     </h3>
                     <div class="overflow-x-auto">
@@ -389,40 +526,24 @@ HTML_PAGE = """<!DOCTYPE html>
                     </div>
                 </div>
 
-                <!-- Export & Actions Card -->
-                <div class="glass p-6 rounded-3xl flex flex-col justify-between">
-                    <div>
-                        <h3 class="text-lg font-bold text-white mb-2">📥 تصدير البيانات</h3>
-                        <p class="text-xs text-slate-400 mb-6">تحميل الجداول بترميز مهيأ لبرنامج Microsoft Excel دون مشاكل الحروف العربية (UTF-8-BOM)، مع الحفظ التلقائي في Firestore.</p>
+                <!-- Side-by-Side Aligned Comparison Table -->
+                <div class="glass p-6 rounded-3xl">
+                    <h3 class="text-lg font-bold text-white mb-4">📖 المقارنة المتزامنة للفقرات والملاحظات اللغوية</h3>
+                    <div class="overflow-x-auto max-h-[650px] overflow-y-auto">
+                        <table class="w-full text-right text-xs">
+                            <thead class="text-slate-400 bg-slate-800/80 sticky top-0 z-10 backdrop-blur">
+                                <tr>
+                                    <th class="p-3 w-12 text-center">#</th>
+                                    <th class="p-3 w-1/4">الأصل الإنجليزي (Source)</th>
+                                    <th class="p-3 w-1/4">الترجمة البشرية (Reference)</th>
+                                    <th class="p-3 w-1/4">ترجمة الذكاء الاصطناعي (AI MT)</th>
+                                    <th class="p-3 w-28 text-center">المقاييس</th>
+                                    <th class="p-3 w-1/5">ملاحظات MQM والخطأ</th>
+                                </tr>
+                            </thead>
+                            <tbody id="comparisonTableBody" class="divide-y divide-slate-800"></tbody>
+                        </table>
                     </div>
-                    <div class="space-y-3">
-                        <button onclick="downloadCSV('details')" class="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition">
-                            <span>📄</span> تحميل التقرير التفصيلي لكل فقرة (CSV)
-                        </button>
-                        <button onclick="downloadCSV('summary')" class="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition">
-                            <span>📊</span> تحميل الملخص الإحصائي ونسب الأخطاء (CSV)
-                        </button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Side-by-Side Aligned Comparison Table -->
-            <div class="glass p-6 rounded-3xl">
-                <h3 class="text-lg font-bold text-white mb-4">📖 المقارنة المتزامنة للفقرات والملاحظات اللغوية</h3>
-                <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
-                    <table class="w-full text-right text-xs">
-                        <thead class="text-slate-400 bg-slate-800/80 sticky top-0 z-10 backdrop-blur">
-                            <tr>
-                                <th class="p-3 w-12 text-center">#</th>
-                                <th class="p-3 w-1/4">الأصل الإنجليزي (Source)</th>
-                                <th class="p-3 w-1/4">الترجمة البشرية (Reference)</th>
-                                <th class="p-3 w-1/4">ترجمة الذكاء الاصطناعي (AI MT)</th>
-                                <th class="p-3 w-28 text-center">المقاييس</th>
-                                <th class="p-3 w-1/5">ملاحظات MQM والخطأ</th>
-                            </tr>
-                        </thead>
-                        <tbody id="comparisonTableBody" class="divide-y divide-slate-800"></tbody>
-                    </table>
                 </div>
             </div>
         </div>
@@ -432,7 +553,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div id="authModal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
         <div class="glass p-8 rounded-3xl w-full max-w-md shadow-2xl relative">
             <button onclick="closeAuthModal()" class="absolute top-4 left-4 text-slate-400 hover:text-white text-lg font-bold">&times;</button>
-            <h3 class="text-lg font-extrabold text-white mb-2" id="authModalTitle">تسجيل الدخول</h3>
+            <h3 class="text-lg font-extrabold text-white mb-2">تسجيل الدخول</h3>
             <p class="text-xs text-slate-400 mb-6">سجل دخولك لحفظ جلسات التقييم في قاعدة بيانات Firebase.</p>
 
             <div class="space-y-4">
@@ -473,7 +594,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="glass p-8 rounded-3xl w-full max-w-3xl shadow-2xl relative max-h-[85vh] flex flex-col">
             <button onclick="closeHistoryModal()" class="absolute top-4 left-4 text-slate-400 hover:text-white text-lg font-bold">&times;</button>
             <h3 class="text-lg font-extrabold text-white mb-2">📜 سجل التقييمات المحفوظة (Firestore)</h3>
-            <p class="text-xs text-slate-400 mb-4">جميع الفصول التي قمت بتقييمها ومقارنتها مخزنة بأمان في حسابك.</p>
+            <p class="text-xs text-slate-400 mb-4">الفصول التي قمت بمقارنتها مخزنة في حسابك.</p>
             
             <div class="overflow-y-auto flex-1">
                 <table class="w-full text-right text-xs">
@@ -488,16 +609,14 @@ HTML_PAGE = """<!DOCTYPE html>
                             <th class="p-3 rounded-l-xl">التاريخ</th>
                         </tr>
                     </thead>
-                    <tbody id="historyTableBody" class="divide-y divide-slate-800">
-                        <tr><td colspan="7" class="p-4 text-center text-slate-500">جاري تحميل السجل...</td></tr>
-                    </tbody>
+                    <tbody id="historyTableBody" class="divide-y divide-slate-800"></tbody>
                 </table>
             </div>
         </div>
     </div>
 
     <script>
-        // Firebase Configuration (Configured for myreports-system)
+        // Firebase Configuration (myreports-system)
         const firebaseConfig = {
             apiKey: "AIzaSyBkWGYSsB4LJgAHWHb1Fz0JgJWI2x9mLEY",
             authDomain: "myreports-system.firebaseapp.com",
@@ -513,61 +632,42 @@ HTML_PAGE = """<!DOCTYPE html>
         let currentUser = null;
         let currentResults = null;
 
-        // Auth state listener
         auth.onAuthStateChanged(user => {
             currentUser = user;
             if (user) {
                 document.getElementById('authLoginBtnSection').classList.add('hidden');
                 document.getElementById('authUserSection').classList.remove('hidden');
                 document.getElementById('userEmailSpan').textContent = user.email || 'مستخدم مسجل';
-                document.getElementById('authBanner').classList.add('hidden');
             } else {
                 document.getElementById('authLoginBtnSection').classList.remove('hidden');
                 document.getElementById('authUserSection').classList.add('hidden');
-                document.getElementById('authBanner').classList.remove('hidden');
             }
         });
 
         function openAuthModal() { document.getElementById('authModal').classList.remove('hidden'); }
         function closeAuthModal() { document.getElementById('authModal').classList.add('hidden'); }
-        function openHistoryModal() { 
-            document.getElementById('historyModal').classList.remove('hidden'); 
-            loadHistory();
-        }
+        function openHistoryModal() { document.getElementById('historyModal').classList.remove('hidden'); loadHistory(); }
         function closeHistoryModal() { document.getElementById('historyModal').classList.add('hidden'); }
 
         async function handleEmailAuth(mode) {
             const email = document.getElementById('authEmail').value.trim();
             const password = document.getElementById('authPassword').value;
-            if (!email || !password) {
-                alert('يرجى إدخال البريد الإلكتروني وكلمة المرور.');
-                return;
-            }
+            if (!email || !password) return alert('يرجى إدخال البريد الإلكتروني وكلمة المرور.');
             try {
-                if (mode === 'signup') {
-                    await auth.createUserWithEmailAndPassword(email, password);
-                } else {
-                    await auth.signInWithEmailAndPassword(email, password);
-                }
+                if (mode === 'signup') await auth.createUserWithEmailAndPassword(email, password);
+                else await auth.signInWithEmailAndPassword(email, password);
                 closeAuthModal();
-            } catch (err) {
-                alert('خطأ في المصادقة: ' + err.message);
-            }
+            } catch (err) { alert('خطأ في المصادقة: ' + err.message); }
         }
 
         async function handleGoogleSignIn() {
-            const provider = new firebase.auth.GoogleAuthProvider();
             try {
-                await auth.signInWithPopup(provider);
+                await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider());
                 closeAuthModal();
-            } catch (err) {
-                alert('خطأ في تسجيل الدخول بجوجل: ' + err.message);
-            }
+            } catch (err) { alert('خطأ في تسجيل الدخول: ' + err.message); }
         }
 
-        async function handleSignOut() {
-            await auth.signOut();
-        }
+        async function handleSignOut() { await auth.signOut(); }
 
         async function loadHistory() {
             const tbody = document.getElementById('historyTableBody');
@@ -606,8 +706,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     tbody.appendChild(tr);
                 });
             } catch (e) {
-                console.error(e);
-                tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-red-400">تعذر تحميل السجل: ${e.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-red-400">تعذر جلب السجل: ${e.message}</td></tr>`;
             }
         }
 
@@ -628,10 +727,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     totalSegments: summaryData.total_units,
                     createdAt: firebase.firestore.FieldValue.serverTimestamp()
                 });
-                console.log("Benchmark saved to Firestore successfully.");
-            } catch (e) {
-                console.error("Firestore save error:", e);
-            }
+            } catch (e) { console.error("Firestore save error:", e); }
         }
 
         async function runEvaluation() {
@@ -651,31 +747,26 @@ HTML_PAGE = """<!DOCTYPE html>
             formData.append('src_text', document.getElementById('srcText').value);
             formData.append('ref_text', document.getElementById('refText').value);
             formData.append('ai_text', document.getElementById('aiText').value);
+            formData.append('book_title', document.getElementById('bookTitleInput').value.trim());
+            formData.append('chapter', document.getElementById('chapterInput').value.trim());
 
             btn.disabled = true;
             btn.classList.add('opacity-50');
             loader.classList.remove('hidden');
 
             try {
-                const response = await fetch('/api/evaluate', {
-                    method: 'POST',
-                    body: formData
-                });
+                const response = await fetch('/api/evaluate', { method: 'POST', body: formData });
                 const data = await response.json();
-                if (data.error) {
-                    alert('خطأ: ' + data.error);
-                    return;
-                }
+                if (data.error) return alert('خطأ: ' + data.error);
+                
                 currentResults = data;
                 renderResults(data);
                 resultsArea.classList.remove('hidden');
                 resultsArea.scrollIntoView({ behavior: 'smooth' });
 
-                // Save to Firestore if user logged in
                 await saveBenchmarkToFirestore(data.summary);
-
             } catch (err) {
-                alert('حدث خطأ أثناء معالجة الطلب: ' + err.message);
+                alert('حدث خطأ أثناء المعالجة: ' + err.message);
             } finally {
                 btn.disabled = false;
                 btn.classList.remove('opacity-50');
@@ -688,9 +779,8 @@ HTML_PAGE = """<!DOCTYPE html>
             document.getElementById('metricMqm').textContent = data.summary.avg_mqm + '%';
             document.getElementById('metricChrf').textContent = data.summary.avg_chrf;
             document.getElementById('metricBleu').textContent = data.summary.avg_bleu;
-            document.getElementById('totalSegmentsBadge').textContent = `إجمالي الفقرات المطابقة: ${data.segments.length}`;
+            document.getElementById('totalSegmentsBadge').textContent = `إجمالي الفقرات: ${data.segments.length}`;
 
-            // Error Breakdown Table
             const errTbody = document.getElementById('errorTableBody');
             errTbody.innerHTML = '';
             data.errors.forEach(err => {
@@ -705,7 +795,6 @@ HTML_PAGE = """<!DOCTYPE html>
                 errTbody.appendChild(tr);
             });
 
-            // Detailed Comparison Table
             const compTbody = document.getElementById('comparisonTableBody');
             compTbody.innerHTML = '';
             data.segments.forEach(seg => {
@@ -735,6 +824,99 @@ HTML_PAGE = """<!DOCTYPE html>
             });
         }
 
+        // ----------------- Export Functions (PDF, DOCX, Markdown, CSV) -----------------
+        
+        // 1. Export PDF
+        function downloadPDF() {
+            if (!currentResults) return;
+            const element = document.getElementById('printableReport');
+            const bookTitle = document.getElementById('bookTitleInput').value.trim() || 'Book';
+            const opt = {
+                margin:       10,
+                filename:     `translation_evaluation_${bookTitle}.pdf`,
+                image:        { type: 'jpeg', quality: 0.98 },
+                html2canvas:  { scale: 2, useCORS: true },
+                jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+            };
+            html2pdf().set(opt).from(element).save();
+        }
+
+        // 2. Export Word (DOCX)
+        async function downloadDOCX() {
+            if (!currentResults) return;
+            const bookTitle = document.getElementById('bookTitleInput').value.trim() || 'كتاب';
+            const chapter = document.getElementById('chapterInput').value.trim() || 'فصل';
+            
+            const payload = {
+                ...currentResults,
+                book_title: bookTitle,
+                chapter: chapter
+            };
+
+            try {
+                const response = await fetch('/api/export/docx', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const blob = await response.blob();
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                link.download = `تقرير_تقييم_الترجمة_${bookTitle}.docx`;
+                link.click();
+            } catch (err) {
+                alert('حدث خطأ أثناء تصدير ملف Word: ' + err.message);
+            }
+        }
+
+        // 3. Export Markdown (.md)
+        function downloadMarkdown() {
+            if (!currentResults) return;
+            const bookTitle = document.getElementById('bookTitleInput').value.trim() || 'كتاب';
+            const chapter = document.getElementById('chapterInput').value.trim() || 'فصل';
+            const dateStr = new Date().toLocaleDateString('ar-EG');
+
+            let md = `# تقرير مقارنة وتقييم جودة الترجمة\\n\\n`;
+            md += `**الكتاب:** ${bookTitle}  \\n`;
+            md += `**الفصل:** ${chapter}  \\n`;
+            md += `**التاريخ:** ${dateStr}  \\n`;
+            md += `**إجمالي الفقرات المطابقة:** ${currentResults.segments.length}\\n\\n`;
+
+            md += `## 1. ملخص المعايير التقييمية الرئيسية\\n\\n`;
+            md += `| المعيار التقييمي | الدرجة المحسوبة | الوصف والمدى |\\n`;
+            md += `| :--- | :---: | :--- |\\n`;
+            md += `| **COMET (wmt22-comet-da)** | **${currentResults.summary.avg_comet}** | مؤشر التقارب الدلالي العصبي (الأقرب لحكم المترجم البشري) |\\n`;
+            md += `| **جودة MQM القياسية** | **${currentResults.summary.avg_mqm}%** | نسبة الجودة المعتمدة بعد حسم نقاط العقوبات لكل 100 كلمة |\\n`;
+            md += `| **معيار chrF++** | **${currentResults.summary.avg_chrf}** | التقييم المورفولوجي الأنسب للغة العربية (0-100) |\\n`;
+            md += `| **معيار BLEU** | **${currentResults.summary.avg_bleu}** | دقة التطابق اللفظي المباشر للكلمات (0-100) |\\n\\n`;
+
+            md += `## 2. توزيع ونسب أنواع الأخطاء (MQM Error Distribution)\\n\\n`;
+            md += `| نوع الخطأ / التصنيف | مستوى الخطورة | عدد التكرار | النسبة المئوية (%) |\\n`;
+            md += `| :--- | :--- | :---: | :---: |\\n`;
+            currentResults.errors.forEach(e => {
+                md += `| ${e.type} | ${e.severity} | ${e.count} | ${e.percentage} |\\n`;
+            });
+            md += `\\n`;
+
+            md += `## 3. جدول المقارنة المتزامنة للفقرات\\n\\n`;
+            md += `| # | الأصل الإنجليزي (Source) | الترجمة البشرية (Reference) | ترجمة الذكاء الاصطناعي (AI MT) | المقاييس | نوع الخطأ والملاحظة |\\n`;
+            md += `| :-: | :--- | :--- | :--- | :-: | :--- |\\n`;
+            currentResults.segments.forEach(s => {
+                const cleanSrc = s.source.replace(/\\|/g, '\\\\|').replace(/\\n/g, ' ');
+                const cleanRef = s.reference.replace(/\\|/g, '\\\\|').replace(/\\n/g, ' ');
+                const cleanHyp = s.hypothesis.replace(/\\|/g, '\\\\|').replace(/\\n/g, ' ');
+                const mScores = `C:${s.comet} / M:${s.mqm}% / ch:${s.chrf} / B:${s.bleu}`;
+                md += `| ${s.id} | ${cleanSrc} | ${cleanRef} | ${cleanHyp} | ${mScores} | **${s.error_type}**: ${s.description} |\\n`;
+            });
+
+            const blob = new Blob(["\\uFEFF" + md], { type: 'text/markdown;charset=utf-8;' });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = `تقرير_تقييم_الترجمة_${bookTitle}.md`;
+            link.click();
+        }
+
+        // 4. Export CSV
         function downloadCSV(type) {
             if (!currentResults) return;
             let csvContent = "";
@@ -764,7 +946,6 @@ HTML_PAGE = """<!DOCTYPE html>
                 });
             }
 
-            // UTF-8 BOM
             const blob = new Blob(["\\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement("a");
             link.href = URL.createObjectURL(blob);
@@ -778,6 +959,23 @@ HTML_PAGE = """<!DOCTYPE html>
 
 async def index_handler(request):
     return web.Response(text=HTML_PAGE, content_type='text/html')
+
+async def export_docx_handler(request):
+    try:
+        data = await request.json()
+        docx_bytes = generate_docx_report(data)
+        book_title = data.get('book_title') or 'report'
+        safe_filename = urllib.parse.quote(f"translation_evaluation_{book_title}.docx")
+        return web.Response(
+            body=docx_bytes,
+            content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            headers={
+                'Content-Disposition': f'attachment; filename="{safe_filename}"; filename*=UTF-8\'\'{safe_filename}'
+            }
+        )
+    except Exception as e:
+        print(f"Error generating docx: {e}")
+        return web.json_response({'error': str(e)}, status=500)
 
 async def evaluate_handler(request):
     data = await request.post()
@@ -905,10 +1103,11 @@ def main():
     app = web.Application(client_max_size=100 * 1024 * 1024)
     app.router.add_get('/', index_handler)
     app.router.add_post('/api/evaluate', evaluate_handler)
+    app.router.add_post('/api/export/docx', export_docx_handler)
     
     port = 8080
     print(f"==================================================")
-    print(f"🚀 تطبيق مقارنة وتقييم ترجمة الكتب مع Firebase Auth & Firestore يعمل بنجاح!")
+    print(f"🚀 تطبيق تقييم ترجمة الكتب مع تصدير (PDF, DOCX, Markdown, CSV) يعمل بنجاح!")
     print(f"👉 افتح المتصفح على الرابط: http://localhost:{port}")
     print(f"==================================================")
     web.run_app(app, host='127.0.0.1', port=port)
