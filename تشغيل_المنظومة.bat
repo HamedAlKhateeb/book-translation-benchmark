@@ -9,13 +9,13 @@ echo       (COMET wmt22 - MQM Framework - chrF++ - BLEU)
 echo ================================================================
 echo.
 echo [*] جاري تشغيل الخادم المحلي...
-echo [*] سيتم فتح المتصفح تلقائياً على الرابط: http://localhost:8080
+echo [*] سيتم فتح المتصفح تلقائياً على الرابط: http://localhost:7860
 echo.
 
 cd /d "%~dp0"
 
 :: فتح المتصفح تلقائياً بعد ثانيتين
-start "" cmd /c "timeout /t 2 >nul & start http://localhost:8080"
+start "" cmd /c "timeout /t 2 >nul & start http://localhost:7860"
 
 :: تشغيل تطبيق الويب
 python app_benchmark_web.py

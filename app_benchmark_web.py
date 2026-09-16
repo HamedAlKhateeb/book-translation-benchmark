@@ -1105,12 +1105,12 @@ def main():
     app.router.add_post('/api/evaluate', evaluate_handler)
     app.router.add_post('/api/export/docx', export_docx_handler)
     
-    port = 8080
+    port = int(os.environ.get('PORT', 7860))
     print(f"==================================================")
     print(f"🚀 تطبيق تقييم ترجمة الكتب مع تصدير (PDF, DOCX, Markdown, CSV) يعمل بنجاح!")
     print(f"👉 افتح المتصفح على الرابط: http://localhost:{port}")
     print(f"==================================================")
-    web.run_app(app, host='127.0.0.1', port=port)
+    web.run_app(app, host='0.0.0.0', port=port)
 
 if __name__ == '__main__':
     main()

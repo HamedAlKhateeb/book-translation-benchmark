@@ -1,3 +1,13 @@
+---
+title: Book Translation Benchmark
+emoji: 📚
+colorFrom: indigo
+colorTo: blue
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # 📚 منظومة تقييم ومقارنة ترجمة الكتب (Book Translation Benchmark & Quality Evaluation)
 
 تطبيق ويب متكامل لمقارنة وتقييم الترجمة الآلية بالترجمة البشرية الاحترافية للكتب والروايات والمقالات، مع دعم استخراج الفصول من صيغ متعددة، ومحاذاة الفقرات ديناميكياً، وتشغيل نموذج **COMET** العصبي، وحساب معايير **MQM**، **chrF++**، و **BLEU**، مع مصادقة مستخدمين وقاعدة بيانات سحابية عبر **Firebase**.
