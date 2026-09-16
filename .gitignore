@@ -10,7 +10,7 @@ venv/
 ENV/
 env/
 
-# Large Book Files & Model checkpoints (Ignore from Git)
+# Large Book Files & Datasets (Kept locally, excluded from GitHub repo)
 *.epub
 *.docx
 !tests/*.docx
@@ -19,6 +19,17 @@ env/
 *.pt
 *.bin
 *.log
+*.csv
+*.html
+*.txt
+
+# Book directories
+الترجمة المجمعة/
+الفصل_الثاني_لكل_كتاب/
+الفصول المترجمة بالذكاء الاصطناعي/
+"2nd chapter for every book"/
+"English versions"/
+"كتب مهمة"/
 
 # Caches
 .cache/
